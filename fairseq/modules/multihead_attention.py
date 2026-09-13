@@ -738,6 +738,24 @@ class MultiheadAttention(nn.Module):
         attn_weights = attn_weights_float.type_as(attn_weights)
         attn_probs = self.dropout_module(attn_weights)
 
+        # analysis/gradcam_analysis.py hook: `extra["attn"]` returned below
+        # (see the need_weights branch further down) is recomputed from
+        # attn_weights_float via a separate view/transpose/mean chain that is
+        # never itself consumed by anything downstream of this function --
+        # i.e. it is not on the backward path to the loss, so
+        # `.retain_grad()` on it is silently a no-op. `attn_probs` (this
+        # variable) IS the tensor actually consumed by the bmm below that
+        # produces the attention output, so it genuinely receives a gradient
+        # from loss.backward(). When `self._capture_attn_grad` is set (only
+        # done by gradcam_analysis.py, default unset / no-op for normal
+        # training and inference), stash it and retain_grad() so the caller
+        # can read `.grad` after backward(). This does not alter any value,
+        # shape, or control flow used elsewhere -- purely additive.
+        if getattr(self, "_capture_attn_grad", False):
+            if attn_probs.requires_grad:
+                attn_probs.retain_grad()
+            self._captured_attn_probs = attn_probs
+
         assert v is not None
         if self.encoder_decoder_attention and bsz != kv_bsz:
             attn = torch.einsum(
